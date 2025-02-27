@@ -1,0 +1,5 @@
+monai
+torch
+numpy
+torchvision
+fastapi[standard]
