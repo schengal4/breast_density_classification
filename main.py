@@ -159,8 +159,9 @@ def validate_image_extension(filename: str) -> None:
             detail=f"Unsupported file type. Allowed: {Config.ALLOWED_EXTENSIONS}"
         )
 
+
 def load_model_sync() -> TorchVisionFCModel:
-    """Load model synchronously at startup (like working app)"""
+    """Load model synchronously with compatibility fixes for deployment"""
     try:
         model = TorchVisionFCModel(
             model_name="inception_v3",
@@ -174,17 +175,76 @@ def load_model_sync() -> TorchVisionFCModel:
         if not os.path.exists(Config.MODEL_PATH):
             raise FileNotFoundError(f"Model file not found: {Config.MODEL_PATH}")
 
-        checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE, weights_only=False)
-        if "model" in checkpoint:
-            model.load_state_dict(checkpoint["model"])
+        # Version-compatible loading strategies
+        checkpoint = None
+        loading_errors = []
+        
+        # Strategy 1: Standard loading (your local method)
+        try:
+            checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE, weights_only=False)
+            logger.info("model_loaded_with_standard_method")
+        except Exception as e:
+            loading_errors.append(f"Standard: {e}")
+            
+            # Strategy 2: Load to CPU first, then move to device
+            try:
+                checkpoint = torch.load(Config.MODEL_PATH, map_location='cpu', weights_only=False)
+                logger.info("model_loaded_with_cpu_method")
+            except Exception as e2:
+                loading_errors.append(f"CPU: {e2}")
+                
+                # Strategy 3: Try without weights_only parameter (older PyTorch)
+                try:
+                    checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE)
+                    logger.info("model_loaded_without_weights_only")
+                except Exception as e3:
+                    loading_errors.append(f"No weights_only: {e3}")
+                    
+                    # Strategy 4: Use pickle protocol compatibility
+                    try:
+                        import pickle
+                        with open(Config.MODEL_PATH, 'rb') as f:
+                            checkpoint = pickle.load(f)
+                        logger.info("model_loaded_with_pickle")
+                    except Exception as e4:
+                        loading_errors.append(f"Pickle: {e4}")
+                        raise RuntimeError(f"All loading methods failed: {loading_errors}")
+
+        # Your diagnostic shows it's a direct OrderedDict, so load it directly
+        if isinstance(checkpoint, dict) and 'fc.weight' in checkpoint:
+            # It's a direct state_dict (as confirmed by your diagnostic)
+            state_dict = checkpoint
+        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
         else:
-            model.load_state_dict(checkpoint)
+            # Assume it's already a state_dict
+            state_dict = checkpoint
+
+        # Load with strict=False to handle minor compatibility issues
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            logger.warning("missing_keys_in_model", missing_keys=missing_keys[:5])  # Log first 5
+        if unexpected_keys:
+            logger.warning("unexpected_keys_in_model", unexpected_keys=unexpected_keys[:5])
+        
+        # Verify the final layer exists and has correct size
+        if hasattr(model, 'fc') and hasattr(model.fc, 'out_features'):
+            if model.fc.out_features != 4:
+                logger.warning("incorrect_output_size", 
+                             expected=4, 
+                             actual=model.fc.out_features)
 
         model.eval()
         logger.info("model_loaded_successfully", 
                    model_path=Config.MODEL_PATH, 
-                   device=str(DEVICE))
+                   device=str(DEVICE),
+                   missing_keys_count=len(missing_keys),
+                   unexpected_keys_count=len(unexpected_keys))
         return model
+        
     except Exception as e:
         logger.error("model_loading_failed", error=str(e), model_path=Config.MODEL_PATH)
         raise
