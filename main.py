@@ -568,6 +568,61 @@ async def debug_files():
     except Exception as e:
         return {"error": str(e)}
     
+# Add this enhanced debug endpoint to check file integrity:
+
+@app.get("/debug/file")
+async def debug_model_file():
+    """Check if model file is corrupted"""
+    try:
+        result = {}
+        
+        if os.path.exists(Config.MODEL_PATH):
+            # Check file size
+            file_size = os.path.getsize(Config.MODEL_PATH)
+            result["file_size_bytes"] = file_size
+            result["file_size_mb"] = round(file_size / (1024*1024), 2)
+            
+            # Check if file is too small (likely corrupted)
+            if file_size < 1024:  # Less than 1KB
+                result["status"] = "CORRUPTED - File too small"
+                result["first_bytes"] = "File too small to read"
+            else:
+                # Read first 50 bytes to check file type
+                with open(Config.MODEL_PATH, 'rb') as f:
+                    first_bytes = f.read(50)
+                
+                result["first_50_bytes"] = str(first_bytes)
+                result["starts_with_pk"] = first_bytes.startswith(b'PK')  # ZIP file
+                result["starts_with_pytorch"] = first_bytes.startswith(b'\x80\x03')  # PyTorch pickle
+                
+                # Check if it's a valid PyTorch file by trying to load metadata only
+                try:
+                    with open(Config.MODEL_PATH, 'rb') as f:
+                        # Try to read the pickle header
+                        import pickle
+                        f.seek(0)
+                        header = f.read(10)
+                        result["pickle_header"] = str(header)
+                        
+                        if len(header) >= 2:
+                            result["is_pickle_format"] = header[0:2] in [b'\x80\x02', b'\x80\x03', b'\x80\x04', b'\x80\x05']
+                        
+                except Exception as e:
+                    result["pickle_check_error"] = str(e)
+                
+                # Final assessment
+                if file_size < 1024*1024:  # Less than 1MB is suspicious for a model
+                    result["status"] = "LIKELY_CORRUPTED - Too small for a model file"
+                elif not (first_bytes.startswith(b'PK') or first_bytes.startswith(b'\x80')):
+                    result["status"] = "CORRUPTED - Not a valid PyTorch/ZIP file"
+                else:
+                    result["status"] = "File looks valid, but torch.load still fails"
+        else:
+            result["status"] = "FILE_NOT_FOUND"
+        
+        return result
+    except Exception as e:
+        return {"error": f"Debug failed: {str(e)}"}
 # Replace ONLY your main block with this:
 if __name__ == "__main__":
     import uvicorn
