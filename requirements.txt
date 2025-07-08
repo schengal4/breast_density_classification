@@ -3,3 +3,5 @@ torch
 numpy
 torchvision
 fastapi[standard]
+structlog
+pydantic 
