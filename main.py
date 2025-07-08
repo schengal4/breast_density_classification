@@ -184,14 +184,10 @@ def load_model_sync() -> TorchVisionFCModel:
             # Try with weights_only=False first (for newer PyTorch)
             checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE, weights_only=False)
             logger.info("model_loaded_with_weights_only_false")
-        except TypeError:
-            # Fallback for older PyTorch versions that don't have weights_only parameter
-            checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE)
-            logger.info("model_loaded_with_legacy_method")
         except Exception as e:
             # Try loading to CPU first, then move to device
             logger.warning("retrying_with_cpu_load", error=str(e))
-            checkpoint = torch.load(Config.MODEL_PATH, map_location='cpu')
+            checkpoint = torch.load(Config.MODEL_PATH, map_location='cpu', weights_only=False)
             logger.info("model_loaded_to_cpu")
 
         # Your checkpoint is directly an OrderedDict (state_dict)
