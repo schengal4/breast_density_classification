@@ -351,31 +351,52 @@ async def audit_logging_middleware(request: Request, call_next):
 # STARTUP EVENT (LIKE WORKING APP) #
 ############################
 
+# Replace your startup event with this crash-resistant version:
 @app.on_event("startup")
 async def load_model():
-    """Load model at startup with enhanced compatibility"""
+    """Load model without crashing the app if it fails"""
     global model_loaded, MODEL, model_load_error
     
     try:
-        logger.info("startup_model_loading", action="model_loading_start")
+        print("=== STARTUP: Attempting model load ===")
         
-        # Log environment info
-        logger.info("environment_info",
-                   python_version=__import__('platform').python_version(),
-                   pytorch_version=torch.__version__,
-                   cuda_available=torch.cuda.is_available())
+        # Critical: Don't let ANY exception crash the app
+        if not os.path.exists(Config.MODEL_PATH):
+            model_load_error = f"Model file missing: {Config.MODEL_PATH}"
+            print(f"ERROR: {model_load_error}")
+            model_loaded = False
+            MODEL = None
+            return  # Exit gracefully - app continues without model
         
         MODEL = load_model_sync()
         model_loaded = True
-        logger.info("Model loaded successfully", action="model_loading_success")
+        print("=== SUCCESS: Model loaded ===")
         
     except Exception as e:
+        # CRITICAL: Catch everything, never crash
         model_load_error = str(e)
-        logger.error("Failed to load model", error=str(e), action="model_loading_error")
-        # Don't raise - let app start but model will be unavailable
+        print(f"ERROR: Model failed to load: {model_load_error}")
         model_loaded = False
         MODEL = None
+        # App continues running even with model failure
+    
+    print(f"Startup complete. Model loaded: {model_loaded}")
 
+# Make health check always work (required for Health Universe)
+@app.get("/health")
+async def health_check():
+    """Health check that NEVER fails"""
+    try:
+        status = "healthy" if model_loaded else "degraded"
+        return {
+            "status": status,
+            "model_loaded": model_loaded,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        }
+    except:
+        # Even if this fails, return something
+        return {"status": "error", "timestamp": time.time()}
+    
 @app.on_event("startup")
 async def set_startup_time():
     """Set startup time for uptime calculation"""
@@ -448,24 +469,6 @@ async def home():
     """
     return HTMLResponse(content=content)
 
-@app.get("/health", response_model=HealthCheckResponse)
-async def health_check():
-    """Health check endpoint (like working app)"""
-    try:
-        health_status = HealthCheckResponse(
-            status="healthy" if model_loaded and not model_load_error else "unhealthy",
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            model_loaded=model_loaded,
-            version=MODEL_VERSION
-        )
-        
-        logger.info("Health check performed", status=health_status.status, action="health_check")
-        return health_status
-        
-    except Exception as e:
-        logger.error("Health check failed", error=str(e), action="health_check_error")
-        raise HTTPException(status_code=500, detail="Health check failed")
-
 @app.post("/classify", response_model=ClassificationResponse)
 async def classify_image(
     request: Request,
@@ -531,9 +534,53 @@ async def classify_image(
             detail="Internal server error during classification"
         )
 
+# Add these 3 debug endpoints:
+
+@app.get("/ping")
+async def ping():
+    """Simple test - if this works, app is running"""
+    return "OK"
+
+@app.get("/debug")
+async def debug_status():
+    """See what's wrong with the model"""
+    return {
+        "app_running": True,
+        "model_loaded": model_loaded,
+        "model_error": model_load_error,
+        "model_path": Config.MODEL_PATH,
+        "model_file_exists": os.path.exists(Config.MODEL_PATH),
+        "current_dir": os.getcwd()
+    }
+
+@app.get("/files")
+async def debug_files():
+    """Check if model file was uploaded"""
+    try:
+        result = {"current_dir": os.getcwd()}
+        
+        # Check models directory
+        if os.path.exists("models"):
+            result["models_dir"] = os.listdir("models")
+        else:
+            result["models_dir"] = "NOT_FOUND"
+        
+        # Check root directory
+        result["root_files"] = os.listdir(".")[:10]  # First 10 files
+        
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+    
+# Replace ONLY your main block with this:
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
+    
+    # CRITICAL: Health Universe expects port 8080
+    port = int(os.getenv("PORT", 8080))  # Changed from 8000
+    
+    print(f"Starting on port {port} for Health Universe")
+    
     uvicorn.run(
         app, 
         host="0.0.0.0", 
