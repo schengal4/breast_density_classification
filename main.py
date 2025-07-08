@@ -35,11 +35,9 @@ from monai.networks.nets import TorchVisionFCModel
 ############################
 
 class Config:
-    """
-    Application configuration using environment variables.
-    Health Universe handles authentication at the platform level.
-    """
-    MODEL_PATH: str = os.getenv("MODEL_PATH", "models/model.pt")
+    """Application configuration using environment variables."""
+    # Use the compatible model file
+    MODEL_PATH: str = os.getenv("MODEL_PATH", "models/model_compatible.pt")
     SAMPLE_DATA_PATH: str = os.getenv("SAMPLE_DATA_PATH", "sample_data/A/sample_A1.jpg")
     MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", "50")) * 1024 * 1024  # 50MB default
     ALLOWED_EXTENSIONS: List[str] = [".jpg", ".jpeg", ".png", ".dcm"]
@@ -161,8 +159,14 @@ def validate_image_extension(filename: str) -> None:
 
 
 def load_model_sync() -> TorchVisionFCModel:
-    """Load model synchronously with compatibility fixes for deployment"""
+    """Load model synchronously with proper compatibility handling"""
     try:
+        # Log environment info for debugging
+        logger.info("loading_model", 
+                   pytorch_version=torch.__version__,
+                   model_path=Config.MODEL_PATH,
+                   device=str(DEVICE))
+        
         model = TorchVisionFCModel(
             model_name="inception_v3",
             num_classes=4,
@@ -175,74 +179,46 @@ def load_model_sync() -> TorchVisionFCModel:
         if not os.path.exists(Config.MODEL_PATH):
             raise FileNotFoundError(f"Model file not found: {Config.MODEL_PATH}")
 
-        # Version-compatible loading strategies
-        checkpoint = None
-        loading_errors = []
-        
-        # Strategy 1: Standard loading (your local method)
+        # Load checkpoint with compatibility handling
         try:
+            # Try with weights_only=False first (for newer PyTorch)
             checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE, weights_only=False)
-            logger.info("model_loaded_with_standard_method")
+            logger.info("model_loaded_with_weights_only_false")
+        except TypeError:
+            # Fallback for older PyTorch versions that don't have weights_only parameter
+            checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE)
+            logger.info("model_loaded_with_legacy_method")
         except Exception as e:
-            loading_errors.append(f"Standard: {e}")
-            
-            # Strategy 2: Load to CPU first, then move to device
-            try:
-                checkpoint = torch.load(Config.MODEL_PATH, map_location='cpu', weights_only=False)
-                logger.info("model_loaded_with_cpu_method")
-            except Exception as e2:
-                loading_errors.append(f"CPU: {e2}")
-                
-                # Strategy 3: Try without weights_only parameter (older PyTorch)
-                try:
-                    checkpoint = torch.load(Config.MODEL_PATH, map_location=DEVICE)
-                    logger.info("model_loaded_without_weights_only")
-                except Exception as e3:
-                    loading_errors.append(f"No weights_only: {e3}")
-                    
-                    # Strategy 4: Use pickle protocol compatibility
-                    try:
-                        import pickle
-                        with open(Config.MODEL_PATH, 'rb') as f:
-                            checkpoint = pickle.load(f)
-                        logger.info("model_loaded_with_pickle")
-                    except Exception as e4:
-                        loading_errors.append(f"Pickle: {e4}")
-                        raise RuntimeError(f"All loading methods failed: {loading_errors}")
+            # Try loading to CPU first, then move to device
+            logger.warning("retrying_with_cpu_load", error=str(e))
+            checkpoint = torch.load(Config.MODEL_PATH, map_location='cpu')
+            logger.info("model_loaded_to_cpu")
 
-        # Your diagnostic shows it's a direct OrderedDict, so load it directly
-        if isinstance(checkpoint, dict) and 'fc.weight' in checkpoint:
-            # It's a direct state_dict (as confirmed by your diagnostic)
-            state_dict = checkpoint
-        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+        # Your checkpoint is directly an OrderedDict (state_dict)
+        if isinstance(checkpoint, dict) and "model" in checkpoint:
             state_dict = checkpoint["model"]
-        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
+            logger.info("extracted_state_dict_from_checkpoint")
         else:
-            # Assume it's already a state_dict
+            # Direct state_dict (which is your case)
             state_dict = checkpoint
+            logger.info("using_direct_state_dict")
 
-        # Load with strict=False to handle minor compatibility issues
+        # Load state dict
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
         
         if missing_keys:
-            logger.warning("missing_keys_in_model", missing_keys=missing_keys[:5])  # Log first 5
+            logger.warning("missing_keys_in_model", 
+                          count=len(missing_keys), 
+                          sample_keys=missing_keys[:3])
         if unexpected_keys:
-            logger.warning("unexpected_keys_in_model", unexpected_keys=unexpected_keys[:5])
-        
-        # Verify the final layer exists and has correct size
-        if hasattr(model, 'fc') and hasattr(model.fc, 'out_features'):
-            if model.fc.out_features != 4:
-                logger.warning("incorrect_output_size", 
-                             expected=4, 
-                             actual=model.fc.out_features)
+            logger.warning("unexpected_keys_in_model", 
+                          count=len(unexpected_keys), 
+                          sample_keys=unexpected_keys[:3])
 
         model.eval()
         logger.info("model_loaded_successfully", 
                    model_path=Config.MODEL_PATH, 
-                   device=str(DEVICE),
-                   missing_keys_count=len(missing_keys),
-                   unexpected_keys_count=len(unexpected_keys))
+                   device=str(DEVICE))
         return model
         
     except Exception as e:
@@ -377,22 +353,28 @@ async def audit_logging_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 async def load_model():
-    """Load model at startup like working app"""
+    """Load model at startup with enhanced compatibility"""
     global model_loaded, MODEL, model_load_error
     
     try:
-        logger.info("Loading model", action="model_loading_start")
+        logger.info("startup_model_loading", action="model_loading_start")
         
-        # Load model synchronously
+        # Log environment info
+        logger.info("environment_info",
+                   python_version=__import__('platform').python_version(),
+                   pytorch_version=torch.__version__,
+                   cuda_available=torch.cuda.is_available())
+        
         MODEL = load_model_sync()
-        
         model_loaded = True
         logger.info("Model loaded successfully", action="model_loading_success")
         
     except Exception as e:
         model_load_error = str(e)
         logger.error("Failed to load model", error=str(e), action="model_loading_error")
-        raise
+        # Don't raise - let app start but model will be unavailable
+        model_loaded = False
+        MODEL = None
 
 @app.on_event("startup")
 async def set_startup_time():
